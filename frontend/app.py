@@ -14,19 +14,42 @@ st.title("PDF 기반 RAG 챗봇")
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
+if "uploaded_pdf" not in st.session_state:
+    st.session_state.uploaded_pdf = None
 
-uploaded_file = st.file_uploader("PDF 파일 업로드", type=["pdf"])
+with st.sidebar:
+    st.header("PDF 업로드")
+    uploaded_file = st.file_uploader("PDF 파일", type=["pdf"])
 
-if uploaded_file and st.button("업로드 및 인덱싱"):
-    with st.spinner("PDF를 업로드하고 인덱싱하는 중입니다..."):
-        files = {"file": (uploaded_file.name, uploaded_file.getvalue(), "application/pdf")}
-        response = requests.post(f"{API_URL}/upload", files=files, timeout=120)
+    if uploaded_file and st.button("업로드 및 인덱싱"):
+        with st.spinner("PDF를 업로드하고 인덱싱하는 중입니다..."):
+            files = {
+                "file": (
+                    uploaded_file.name,
+                    uploaded_file.getvalue(),
+                    "application/pdf",
+                )
+            }
+            response = requests.post(f"{API_URL}/upload", files=files, timeout=120)
 
-    if response.ok:
-        result = response.json()
-        st.success(f"{result['filename']} 인덱싱 완료: {result['chunks']}개 chunk")
-    else:
-        st.error(response.text)
+        if response.ok:
+            result = response.json()
+            st.session_state.uploaded_pdf = result
+            st.success(f"{result['filename']} 인덱싱 완료")
+            st.caption(f"{result['chunks']}개 chunk 저장")
+        else:
+            st.error(response.text)
+
+    if st.session_state.uploaded_pdf:
+        st.divider()
+        st.caption("현재 문서")
+        st.write(st.session_state.uploaded_pdf["filename"])
+        st.caption(f"{st.session_state.uploaded_pdf['chunks']}개 chunk")
+
+    st.divider()
+    if st.button("채팅 초기화"):
+        st.session_state.messages = []
+        st.rerun()
 
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
