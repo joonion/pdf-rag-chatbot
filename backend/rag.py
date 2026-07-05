@@ -16,129 +16,138 @@ CHAT_MODEL = os.getenv("OPENAI_CHAT_MODEL", "gpt-4.1-mini")
 COLLECTION_NAME = "pdf_chunks"
 
 
-def get_openai_client():
+def ensure_openai_api_key() -> None:
     if not os.getenv("OPENAI_API_KEY"):
         raise RuntimeError(".env 파일에 OPENAI_API_KEY를 설정해 주세요.")
+
+
+def get_openai_client():
+    ensure_openai_api_key()
 
     from openai import OpenAI
 
     return OpenAI()
 
 
-def get_collection():
-    import chromadb
+def get_embeddings():
+    ensure_openai_api_key()
 
-    chroma_client = chromadb.PersistentClient(path=str(CHROMA_DIR))
-    return chroma_client.get_or_create_collection(name=COLLECTION_NAME)
+    from langchain_openai import OpenAIEmbeddings
+
+    return OpenAIEmbeddings(model=EMBEDDING_MODEL)
 
 
-def extract_text_from_pdf(pdf_path: Path) -> str:
-    from pypdf import PdfReader
+def get_vectorstore():
+    from langchain_chroma import Chroma
 
-    reader = PdfReader(str(pdf_path))
-    pages = []
-    for page in reader.pages:
-        pages.append(page.extract_text() or "")
-    return "\n".join(pages)
+    return Chroma(
+        collection_name=COLLECTION_NAME,
+        embedding_function=get_embeddings(),
+        persist_directory=str(CHROMA_DIR),
+    )
 
 
 def split_text(text: str, chunk_size: int = 1000, overlap: int = 150) -> list[str]:
-    chunks = []
-    start = 0
     clean_text = " ".join(text.split())
+    if not clean_text:
+        return []
 
-    while start < len(clean_text):
-        end = start + chunk_size
-        chunk = clean_text[start:end]
-        if chunk:
-            chunks.append(chunk)
-        if end >= len(clean_text):
-            break
-        start = end - overlap
+    from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-    return chunks
+    chunk_overlap = min(overlap, max(chunk_size - 1, 0))
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+        separators=["\n\n", "\n", " ", ""],
+    )
+    return splitter.split_text(clean_text)
 
 
-def embed_texts(texts: list[str]) -> list[list[float]]:
-    client = get_openai_client()
-    response = client.embeddings.create(model=EMBEDDING_MODEL, input=texts)
-    return [item.embedding for item in response.data]
+def load_pdf_documents(pdf_path: Path):
+    from langchain_community.document_loaders import PyPDFLoader
+
+    loader = PyPDFLoader(str(pdf_path))
+    return loader.load()
+
+
+def split_documents(documents: list, chunk_size: int = 1000, overlap: int = 150):
+    from langchain_text_splitters import RecursiveCharacterTextSplitter
+
+    chunk_overlap = min(overlap, max(chunk_size - 1, 0))
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+        separators=["\n\n", "\n", " ", ""],
+    )
+    return splitter.split_documents(documents)
 
 
 def index_pdf(pdf_path: Path) -> dict:
-    text = extract_text_from_pdf(pdf_path)
-    chunks = split_text(text)
+    documents = load_pdf_documents(pdf_path)
+    chunks = split_documents(documents)
 
     if not chunks:
         return {"chunks": 0}
 
-    embeddings = embed_texts(chunks)
-    ids = [f"{pdf_path.stem}-{i}" for i in range(len(chunks))]
-    metadatas = [{"source": pdf_path.name, "chunk": i} for i in range(len(chunks))]
+    for index, chunk in enumerate(chunks):
+        chunk.metadata["source"] = pdf_path.name
+        chunk.metadata["chunk"] = index
 
-    collection = get_collection()
-    collection.delete(where={"source": pdf_path.name})
-    collection.upsert(
-        ids=ids,
-        documents=chunks,
-        embeddings=embeddings,
-        metadatas=metadatas,
-    )
+    ids = [f"{pdf_path.stem}-{i}" for i in range(len(chunks))]
+
+    vectorstore = get_vectorstore()
+    vectorstore.delete(where={"source": pdf_path.name})
+    vectorstore.add_documents(documents=chunks, ids=ids)
 
     return {"chunks": len(chunks)}
 
 
 def answer_question(question: str, top_k: int = 4) -> dict:
-    question_embedding = embed_texts([question])[0]
-    collection = get_collection()
-    results = collection.query(
-        query_embeddings=[question_embedding],
-        n_results=top_k,
-        include=["documents", "metadatas"],
-    )
+    from langchain_core.prompts import ChatPromptTemplate
+    from langchain_openai import ChatOpenAI
 
-    contexts = results.get("documents", [[]])[0]
-    metadatas = results.get("metadatas", [[]])[0]
+    vectorstore = get_vectorstore()
+    retriever = vectorstore.as_retriever(search_kwargs={"k": top_k})
+    documents = retriever.invoke(question)
 
-    if not contexts:
+    if not documents:
         return {
             "answer": "검색된 문맥이 없습니다. 먼저 PDF를 업로드해 주세요.",
             "contexts": [],
         }
 
     context_text = "\n\n".join(
-        f"[{i + 1}] {context}" for i, context in enumerate(contexts)
+        f"[{i + 1}] {document.page_content}"
+        for i, document in enumerate(documents)
     )
 
-    prompt = f"""
-다음 문맥을 참고해서 사용자의 질문에 한국어로 답변하세요.
-문맥에 답이 없으면 모른다고 말하세요.
-
-문맥:
-{context_text}
-
-질문:
-{question}
-"""
-
-    client = get_openai_client()
-    completion = client.chat.completions.create(
+    prompt = ChatPromptTemplate.from_messages(
+        [
+            ("system", "당신은 PDF 문서를 기반으로 답변하는 도우미입니다."),
+            (
+                "user",
+                "다음 문맥을 참고해서 사용자의 질문에 한국어로 답변하세요.\n"
+                "문맥에 답이 없으면 모른다고 말하세요.\n\n"
+                "문맥:\n{context}\n\n"
+                "질문:\n{question}",
+            ),
+        ]
+    )
+    llm = ChatOpenAI(
         model=CHAT_MODEL,
-        messages=[
-            {"role": "system", "content": "당신은 PDF 문서를 기반으로 답변하는 도우미입니다."},
-            {"role": "user", "content": prompt},
-        ],
         temperature=0.2,
     )
+    chain = prompt | llm
+    response = chain.invoke({"context": context_text, "question": question})
 
     return {
-        "answer": completion.choices[0].message.content,
+        "answer": response.content,
         "contexts": [
             {
-                "text": context,
-                "source": metadata.get("source"),
-                "chunk": metadata.get("chunk"),
+                "text": document.page_content,
+                "source": document.metadata.get("source"),
+                "chunk": document.metadata.get("chunk"),
             }
-            for context, metadata in zip(contexts, metadatas)
+            for document in documents
         ],
     }
