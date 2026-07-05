@@ -12,6 +12,9 @@ API_URL = os.getenv("API_URL", "http://localhost:8000")
 st.set_page_config(page_title="PDF RAG Chatbot", page_icon="📄")
 st.title("PDF 기반 RAG 챗봇")
 
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
 uploaded_file = st.file_uploader("PDF 파일 업로드", type=["pdf"])
 
 if uploaded_file and st.button("업로드 및 인덱싱"):
@@ -25,12 +28,25 @@ if uploaded_file and st.button("업로드 및 인덱싱"):
     else:
         st.error(response.text)
 
-question = st.text_input("질문 입력")
+for message in st.session_state.messages:
+    with st.chat_message(message["role"]):
+        st.write(message["content"])
 
-if st.button("질문하기"):
-    if not question.strip():
-        st.warning("질문을 입력해 주세요.")
-    else:
+        if message["role"] == "assistant" and message.get("contexts"):
+            with st.expander("참고 문맥"):
+                for i, context in enumerate(message["contexts"], start=1):
+                    st.markdown(f"**문맥 {i} - {context.get('source')}**")
+                    st.write(context["text"])
+
+question = st.chat_input("PDF 내용에 대해 질문하세요")
+
+if question:
+    st.session_state.messages.append({"role": "user", "content": question})
+
+    with st.chat_message("user"):
+        st.write(question)
+
+    with st.chat_message("assistant"):
         with st.spinner("답변을 생성하는 중입니다..."):
             response = requests.post(
                 f"{API_URL}/ask",
@@ -40,12 +56,30 @@ if st.button("질문하기"):
 
         if response.ok:
             result = response.json()
-            st.subheader("답변")
-            st.write(result["answer"])
+            answer = result["answer"]
+            contexts = result["contexts"]
 
-            st.subheader("참고 문맥")
-            for i, context in enumerate(result["contexts"], start=1):
-                with st.expander(f"문맥 {i} - {context.get('source')}"):
-                    st.write(context["text"])
+            st.write(answer)
+            if contexts:
+                with st.expander("참고 문맥"):
+                    for i, context in enumerate(contexts, start=1):
+                        st.markdown(f"**문맥 {i} - {context.get('source')}**")
+                        st.write(context["text"])
+
+            st.session_state.messages.append(
+                {
+                    "role": "assistant",
+                    "content": answer,
+                    "contexts": contexts,
+                }
+            )
         else:
-            st.error(response.text)
+            error_message = response.text
+            st.error(error_message)
+            st.session_state.messages.append(
+                {
+                    "role": "assistant",
+                    "content": error_message,
+                    "contexts": [],
+                }
+            )
