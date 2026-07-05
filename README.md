@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # PDF RAG Chatbot
 
 FastAPI와 Streamlit으로 만든 교육용 PDF 기반 RAG 챗봇입니다. 사용자는 PDF를 업로드하고, OpenAI Embeddings와 Chroma DB로 저장된 문맥을 기반으로 질문할 수 있습니다.
@@ -98,3 +99,7 @@ python -m unittest discover -s tests
   ]
 }
 ```
+=======
+# pdf-rag-chatbot
+An LLM Chatbot for PDF-based RAG
+>>>>>>> origin/main
